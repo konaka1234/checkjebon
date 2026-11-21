@@ -29,6 +29,10 @@ var app = new Vue(
 	},
 	computed:
 	{
+		pricesNeedReview: function()
+		{
+			return this.supermarkets.some(store => store.products.some(product => product.needsReview));
+		},
 		compareLabel: function()
 		{
 			if (this.isSearching) return this.t('searching');
@@ -85,52 +89,25 @@ var app = new Vue(
 			}
 			
 			this.isSearching = true;
-			const search = prepareProductSearch(this.shoppinglist);
 			
 			try {
-				const result = await checkjebon.getOptimalShoppingPlan(
-					search.queries,
-					this.maxSupermarkets,
-					this.selectedSupermarketCodes
-				);
-				
-				this.pricesLastUpdated = checkjebon.pricesLastUpdated();
+				const prices = await getShoppingListPrices(this.shoppinglist, this.language);
+				const result = checkjebon.getShoppingPlanForPrices(prices, this.maxSupermarkets, this.selectedSupermarketCodes);
+				const selectedStores = prices.filter(store => this.selectedSupermarketCodes.includes(store.code));
+				const best = selectedStores.reduce((cheapest, store) => store.totalPrice < cheapest.totalPrice ? store : cheapest);
 				const plan = {
 					...result,
-					supermarkets: result.supermarkets.map(s => ({
-						...s,
-						products: s.products.map(search.restore),
-						totalPrice: s.products.reduce((sum, p) => sum + (p.price || 0), 0),
-						notFound: s.products.filter(p => p.isEstimate).length
-					}))
+					supermarkets: result.supermarkets.map(store => ({
+						...store,
+						totalPrice: store.products.reduce((total, product) => total + (product.price ?? 0), 0)
+					})),
+					bestSingleTotal: best.totalPrice,
+					bestSingleName: best.name,
+					totalSavings: best.totalPrice - result.totalCost,
+					needsReview: result.supermarkets.some(store => store.products.some(product => product.needsReview))
 				};
-				this.selectedSupermarket = null; // Clear single selection
-
-				// Compute aggregate values for the shopping plan
-				// totalCost: sum of assigned products' prices
-				plan.totalCost = plan.supermarkets.reduce((sum, s) => sum + (s.totalPrice || 0), 0);
-				plan.bestSingleTotal = null;
-				plan.totalSavings = 0;
-
-				// Compute best single-supermarket total using current product list and selected supermarket codes
-				try {
-					const allPricesResults = await checkjebon.getPricesForProducts(search.queries);
-					// Filter to only supermarkets that were selectable for this plan (selectedSupermarketCodes)
-					const filtered = allPricesResults.filter(s => this.selectedSupermarketCodes.includes(s.code));
-					const singleTotals = filtered.map(s => ({
-						code: s.code,
-						name: s.name,
-						totalPrice: s.products.reduce((sum, p) => sum + (p.price || 0), 0)
-					}));
-					if (singleTotals.length > 0) {
-						const best = singleTotals.reduce((min, s) => s.totalPrice < min.totalPrice ? s : min, singleTotals[0]);
-						plan.bestSingleTotal = best.totalPrice;
-						plan.bestSingleName = best.name;
-						plan.totalSavings = best.totalPrice - plan.totalCost;
-					}
-				} catch (e) {
-					console.error('Failed to compute single-shop totals', e);
-				}
+				this.pricesLastUpdated = checkjebon.pricesLastUpdated();
+				this.selectedSupermarket = null;
 				this.shoppingPlan = plan;
 				
 				if (scrollToResults) {
@@ -267,16 +244,9 @@ var app = new Vue(
 			this.isSearching = true;
 			this.showSupermarketSelection = false;
 			this.shoppingPlan = null;
-			const search = prepareProductSearch(this.shoppinglist);
 			try {
-				const results = await checkjebon.getPricesForProducts(search.queries);
+				this.supermarkets = await getShoppingListPrices(this.shoppinglist, this.language);
 				this.pricesLastUpdated = checkjebon.pricesLastUpdated();
-				this.supermarkets = results.map(s => ({
-					...s,
-					products: s.products.map(search.restore),
-					totalPrice: s.products.reduce((sum, p) => sum + (p.price || 0), 0),
-					notFound: s.products.filter(p => p.isEstimate).length
-				}));
 				this.supermarkets.sort((a, b) => a.totalPrice - b.totalPrice);
 				if (!this.selectedSupermarket) {
 					setTimeout(function()

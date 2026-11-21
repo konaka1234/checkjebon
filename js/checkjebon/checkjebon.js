@@ -25,20 +25,21 @@ async function getSupermarkets() {
  * Rounds all prices to two decimals.
  * Downloads supermarkets.json from checkjebon.nl and caches for 1 hour.
  * @param {string[]} productNames
+ * @param {Array<Function|undefined>} nameMatchers Optional strict name matcher per query.
  * @returns {Promise<Array>} Array of supermarkets with found products and their verbose info
  */
-async function getPricesForProducts(productNames) {
+async function getPricesForProducts(productNames, nameMatchers = []) {
   const supermarkets = await getSupermarketsJson();
 
   // For each product, precompute prices across all supermarkets for fallback
-  const allProductMatches = productNames.map(name =>
-    supermarkets.map(s => findProduct(s.d, name))
+  const allProductMatches = productNames.map((name, index) =>
+    supermarkets.map(s => findProduct(s.d, name, nameMatchers[index]))
   );
 
   return supermarkets.map((supermarket, supermarketIndex) => {
     const baseUrl = supermarket.u || '';
     const foundProducts = productNames.map((name, prodIdx) => {
-      const match = findProduct(supermarket.d, name);
+      const match = allProductMatches[prodIdx][supermarketIndex];
       if (match) {
         return {
           name: match.n,
@@ -132,6 +133,11 @@ function pricesLastUpdated() {
 async function getOptimalShoppingPlan(productNames, maxSupermarketVisitCount, selectedSupermarketCodes) {
   // Get prices for all products at all supermarkets
   const allPrices = await getPricesForProducts(productNames);
+  return getShoppingPlanForPrices(allPrices, maxSupermarketVisitCount, selectedSupermarketCodes);
+}
+
+// Plan from the same validated prices shown in the single-store comparison.
+function getShoppingPlanForPrices(allPrices, maxSupermarketVisitCount, selectedSupermarketCodes) {
 
   // Filter to only selected supermarkets
   const selectedSupermarkets = allPrices.filter(s =>
@@ -144,13 +150,8 @@ async function getOptimalShoppingPlan(productNames, maxSupermarketVisitCount, se
 
   // Build a matrix of prices: products x supermarkets
   // For each product, track which supermarket has the best price
-  const productCount = productNames.length;
+  const productCount = selectedSupermarkets[0].products.length;
   const supermarketCount = selectedSupermarkets.length;
-
-  // Helper function to check if a product has a valid, non-estimated price
-  const isValidPrice = (product) => {
-    return product && !product.isEstimate && typeof product.price === 'number';
-  };
 
   // Create price matrix: priceMatrix[productIndex][supermarketIndex] = price (or null)
   const priceMatrix = [];
@@ -169,7 +170,7 @@ async function getOptimalShoppingPlan(productNames, maxSupermarketVisitCount, se
   const bestCombination = findBestSupermarketCombination(
     priceMatrix,
     selectedSupermarkets,
-    productNames,
+    productCount,
     maxSupermarketVisitCount
   );
 
@@ -184,8 +185,7 @@ async function getOptimalShoppingPlan(productNames, maxSupermarketVisitCount, se
  * @param {number} maxStores - Maximum number of stores to visit
  * @returns {Object} Best combination with totalCost and supermarkets
  */
-function findBestSupermarketCombination(priceMatrix, supermarkets, productNames, maxStores) {
-  const productCount = productNames.length;
+function findBestSupermarketCombination(priceMatrix, supermarkets, productCount, maxStores) {
   const supermarketCount = supermarkets.length;
   const supermarketIndices = Array.from({ length: supermarketCount }, (_, i) => i);
 
@@ -321,7 +321,7 @@ const unitofmeasures = [
 ];
 
 const unitofmeasurePattern = new RegExp(
-  "([\\d\\.,]+)\\s?(" + unitofmeasures.map(unit => unit.name).join("|") + ")", "i"
+  "([\\d\\.,]+)\\s?(" + unitofmeasures.map(unit => unit.name).join("|") + ")\\b", "i"
 );
 
 function getAmount(value) {
@@ -339,8 +339,9 @@ function convertAmountToBase(value) {
 }
 
 function compareMinimumAmounts(productAmount, searchAmount) {
-  const productAmountValue = parseInt(productAmount.match(/([0-9]+)/));
-  const searchAmountValue = parseInt(searchAmount.match(/([0-9]+)/));
+  if (!productAmount || !searchAmount) return false;
+  const productAmountValue = parseFloat(productAmount);
+  const searchAmountValue = parseFloat(searchAmount);
   let productAmountUnit = productAmount.match(/([a-z]+)/i);
   let searchAmountUnit = searchAmount.match(/([a-z]+)/i);
 
@@ -383,8 +384,19 @@ function findProducts(products, value) {
   return productMatches;
 }
 
-function findProduct(products, name) {
-  return findProducts(products, name)[0];
+function findProduct(products, name, matchesName) {
+  if (!matchesName) return findProducts(products, name)[0];
+
+  const minimum = convertAmountToBase(getAmount(name));
+  let cheapest;
+  for (const product of products) {
+    if (!Number.isFinite(product.p) || !matchesName(product.n)) continue;
+    // Several stores include the pack size only in the product title.
+    const amount = convertAmountToBase(product.s || getAmount(product.n));
+    if (minimum && !compareMinimumAmounts(amount, minimum)) continue;
+    if (!cheapest || product.p < cheapest.p) cheapest = product;
+  }
+  return cheapest;
 }
 
 function roundPrice(price) {
@@ -492,8 +504,10 @@ async function getSupermarketsJson() {
 
 
 const exported = {
+  getAmount,
   getPricesForProducts,
   getOptimalShoppingPlan,
+  getShoppingPlanForPrices,
   getSupermarkets,
   getCheckjebonLink,
   pricesLastUpdated

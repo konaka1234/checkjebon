@@ -17,7 +17,7 @@
 		<script src="./js/tesseract/tesseract.min.js"></script>
 		<script src="./js/fuse/fuse.js"></script>
 		<!-- Checkjebon-js -->
-		<script src="https://supermarkt.github.io/checkjebon-js/checkjebon.js"></script>
+		<script src="./js/checkjebon/checkjebon.js"></script>
 		<script>
 			tailwind.config = {
 				theme: {
@@ -115,6 +115,7 @@
 			<div class="w-full flex justify-center mt-10" id="supermarkets" v-show="supermarkets.length > 0">
 				<div class="bg-white rounded-2xl shadow-xl p-8 max-w-2xl w-full">
 					<h2 class="text-2xl font-bold text-center text-gray-900 tracking-tight mb-6 uppercase">{{ t('supermarkets') }}</h2>
+					<p v-if="pricesNeedReview" class="mb-4 text-center text-sm text-amber-800">{{ t('reviewTotals') }}</p>
 					<ul class="divide-y divide-gray-200">
 						<li class="flex items-center py-4 cursor-pointer transition hover:bg-yellow-50 px-2" :class="{'bg-yellow-100': supermarket.code == selectedSupermarket?.code}" v-for="supermarket in supermarkets" :key="supermarket.code" @click="selectedSupermarket=supermarket; select()">
 							<img v-bind:src="supermarket.icon" class="rounded-full mr-4 shadow" style="width: 60px" alt="">
@@ -147,6 +148,7 @@
 			</div>
 
 			<div class="w-full flex flex-col items-center mt-10" id="shopping-plan" v-if="shoppingPlan">
+				<p v-if="shoppingPlan.needsReview" class="mb-4 text-center text-sm text-amber-800">{{ t('reviewTotals') }}</p>
 				<div class="w-full max-w-2xl mb-4 text-center">
 					<div v-if="shoppingPlan.supermarkets.length > 1" class="bg-white rounded-lg p-4 mb-4">
 						<h2 class="text-xl font-semibold mb-2">{{ t('planOverview') }}</h2>
@@ -217,7 +219,7 @@
 						<input type="checkbox" class="form-checkbox h-5 w-5 text-blue-600 mr-4" :checked="product.checked" :aria-label="product.originalQuery.replace(/^x\s/, '')" @click="$emit('check', product, $event)">
 						<div class="flex-grow">
 							<span :class="['font-semibold text-base', product.checked ? 'line-through text-gray-400' : 'text-gray-900']">
-								<a v-if="!product.isEstimate" v-bind:href="product.link" target="_blank" lang="nl" :class="product.checked ? 'line-through text-gray-400 hover:underline' : 'hover:underline'" :title="product.originalQuery?.replace(/^x\s/, '')">
+								<a v-if="product.name" v-bind:href="product.link" target="_blank" lang="nl" :class="product.checked ? 'line-through text-gray-400 hover:underline' : 'hover:underline'" :title="product.originalQuery?.replace(/^x\s/, '')">
 									{{ product.name }}
 								</a>
 								<span v-if="!product.price || product.isEstimate">
@@ -229,7 +231,11 @@
 									<i class="fa fa-pencil cursor-pointer" @click="$emit('edit', product, t('editTip'))" :title="t('editProduct')"></i>
 									{{ formatAmount(product.amount) }}
 								</span>
-								<span v-if="!product.price && !product.isEstimate">
+								<span v-if="product.needsReview">
+									<button type="button" class="font-semibold text-amber-800 hover:underline" @click="$emit('edit', product, t('reviewItemTip', { name: product.searchedName }))">{{ t('reviewItem') }}</button>
+									<span class="block">{{ t('searchedFor', { name: product.searchedName }) }}</span>
+								</span>
+								<span v-else-if="!product.price && !product.isEstimate">
 									<i class="fa fa-exclamation-triangle cursor-pointer" @click="$emit('edit', product, t('missingProductTip'))" :title="t('editProduct')"></i>
 									{{ t('missingProduct') }}
 								</span>

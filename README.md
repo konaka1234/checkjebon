@@ -20,13 +20,16 @@ You can share your current shopping list with family members or friends at any t
 
 Choose **English** in the language menu or open the page with `?lang=en`. The
 site remembers your language preference. Shopping lists accept Dutch and common
-English grocery terms, such as `semi-skimmed milk` and `brown rice`. Results show
-the supermarket's original product names. If a term does not match, try the Dutch
-product name.
+English grocery terms, such as `500 g chicken drumsticks` and `Oatly oat milk`.
+Results show the supermarket's original product names. Items without a reliable
+match are flagged for review and left out of the total. You can edit the search
+term from the result and try the supermarket's Dutch product name.
 
 To run the site locally, run `python3 -m http.server 8000` from the repository
-root and open `http://localhost:8000/?lang=en`. The app uses the upstream
-Checkjebon JavaScript library and price data, so price comparisons need internet access.
+root and open `http://localhost:8000/?lang=en`. The app uses a local copy of
+`checkjebon-js` with support for stricter search rules. It still fetches price
+data from Checkjebon.nl. Run `node --test` to check the bilingual search and
+shopping-plan regression cases.
 
 # Including in other products
 
