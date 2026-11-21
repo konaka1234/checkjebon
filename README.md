@@ -26,6 +26,12 @@ Results show the supermarket's original product names. Items without a reliable
 match are flagged for review and left out of the total. You can edit the search
 term from the result and try the supermarket's Dutch product name.
 
+Use the pencil in a store's basket to compare up to three other matches.
+When the catalogue gives the pack weight or volume, the picker shows the unit
+price as well as the pack price. Choosing a product changes that store's quote
+and saves the choice with your list. Partial totals show how many prices were
+matched, estimated or unavailable.
+
 To run the site locally, run `python3 -m http.server 8000` from the repository
 root and open `http://localhost:8000/?lang=en`. The app uses a local copy of
 `checkjebon-js` with support for stricter search rules. It still fetches price

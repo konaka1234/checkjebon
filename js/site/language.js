@@ -22,7 +22,9 @@ const messages = {
 		makePlan: 'Maak winkelplan',
 		supermarkets: 'Supermarkten',
 		storePrice: '{store}: {price} euro',
-		missingCount: '{missing} van {count} niet gevonden in {catalogue} producten',
+		basketMatched: '{count} gevonden',
+		basketEstimated: '{count} geschat',
+		basketUnpriced: '{count} zonder prijs',
 		catalogueCount: '{catalogue} producten',
 		whyMissingStart: 'Waarom sommige',
 		whyMissingLink: 'supermarkten ontbreken',
@@ -32,6 +34,7 @@ const messages = {
 		total: 'Totaal',
 		bestSingleStore: 'Als je alle producten bij de goedkoopste winkel koopt ({store})',
 		savings: 'Extra besparing',
+		extraCost: 'Extra kosten',
 		totalPrice: 'Totaalprijs: {price}',
 		storeCount: 'Aantal winkels: {count}',
 		about: 'Over Checkjebon.nl',
@@ -47,6 +50,15 @@ const messages = {
 		lastUpdated: 'Laatst bijgewerkt op {date}',
 		shareList: 'Deel je boodschappenlijst',
 		editProduct: 'Product aanpassen',
+		editSearch: 'Zoekterm aanpassen',
+		useAutomaticMatch: 'Automatische keuze gebruiken',
+		chooseMatch: 'Ander product kiezen',
+		chooseMatchFor: 'Kies een ander product voor {name}',
+		loadingMatches: 'Alternatieven laden…',
+		noOtherMatches: 'Geen andere passende producten gevonden.',
+		matchLoadError: 'Alternatieven konden niet worden geladen.',
+		matchUnavailable: 'Dit product is niet meer beschikbaar. Open de alternatieven opnieuw.',
+		currentMatchUnitPrice: 'Huidig product · {price}',
 		editTip: 'Bedoelde je soms iets anders? Pas dan de naam van dit product aan.\n\nTip: Hoe specifieker je bent, hoe beter het resultaat. Gebruik bijvoorbeeld "smeerboter" in plaats van "boter" of "1,5 liter halfvolle melk" in plaats van alleen "melk".',
 		reviewItem: 'Controleer dit product',
 		reviewItemTip: 'Geen betrouwbare prijs gevonden voor “{name}”. Pas de naam of hoeveelheid aan en probeer het opnieuw.',
@@ -89,7 +101,9 @@ const messages = {
 		makePlan: 'Create shopping plan',
 		supermarkets: 'Supermarkets',
 		storePrice: '{store}: {price} euros',
-		missingCount: '{missing} of {count} items missing from a catalogue of {catalogue} products',
+		basketMatched: '{count} matched',
+		basketEstimated: '{count} estimated',
+		basketUnpriced: '{count} unpriced',
 		catalogueCount: '{catalogue} products',
 		whyMissingStart: 'Why',
 		whyMissingLink: 'some supermarkets are missing',
@@ -99,6 +113,7 @@ const messages = {
 		total: 'Total',
 		bestSingleStore: 'Buying everything at the cheapest single store ({store})',
 		savings: 'Extra savings',
+		extraCost: 'Extra cost',
 		totalPrice: 'Total price: {price}',
 		storeCount: 'Number of stores: {count}',
 		about: 'About Checkjebon.nl',
@@ -114,6 +129,15 @@ const messages = {
 		lastUpdated: 'Last updated on {date}',
 		shareList: 'Share your shopping list',
 		editProduct: 'Edit product',
+		editSearch: 'Edit search',
+		useAutomaticMatch: 'Use automatic match',
+		chooseMatch: 'Choose a different match',
+		chooseMatchFor: 'Choose a different match for {name}',
+		loadingMatches: 'Loading alternatives…',
+		noOtherMatches: 'No other matches found.',
+		matchLoadError: 'Could not load alternatives.',
+		matchUnavailable: 'This item is no longer available. Open the alternatives again.',
+		currentMatchUnitPrice: 'Current match · {price}',
 		editTip: 'Looking for something else? Change the product name below.\n\nTry a more specific term such as "spreadable butter" or "1.5 litres semi-skimmed milk". You can also use the Dutch product name.',
 		reviewItem: 'Check this item',
 		reviewItemTip: 'We could not find a reliable price for “{name}”. Try adjusting the product name or quantity.',
@@ -140,6 +164,10 @@ const priceFormats = Object.fromEntries(Object.entries(locales).map(([language, 
 	language,
 	new Intl.NumberFormat(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: false })
 ]));
+const matchPriceFormats = Object.fromEntries(Object.entries(locales).map(([language, locale]) => [
+	language,
+	new Intl.NumberFormat(locale, { style: 'currency', currency: 'EUR' })
+]));
 
 function initialLanguage()
 {
@@ -158,6 +186,24 @@ Vue.mixin({
 		},
 		formatPrice(value) {
 			return value > 0 ? priceFormats[this.$root.language].format(value) : '-';
+		},
+		formatMatchPrice(value) {
+			return matchPriceFormats[this.$root.language].format(value);
+		},
+		formatUnitPrice(unitPrice) {
+			return this.formatMatchPrice(unitPrice.price) + '/' + unitPrice.unit;
+		},
+		basketBreakdown(store) {
+			const counts = [this.t('basketMatched', { count: this.formatCount(store.matchedCount) })];
+			if (store.estimatedCount)
+			{
+				counts.push(this.t('basketEstimated', { count: this.formatCount(store.estimatedCount) }));
+			}
+			if (store.unpricedCount)
+			{
+				counts.push(this.t('basketUnpriced', { count: this.formatCount(store.unpricedCount) }));
+			}
+			return counts.join(' · ');
 		},
 		formatCount(value) {
 			return value.toLocaleString(locales[this.$root.language]);

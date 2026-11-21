@@ -4,7 +4,7 @@ Vue.component('share-button', {
 
 Vue.component('supermarket-products', {
 	template: '#supermarket-products-template',
-	props: ['supermarket', 'showShareButton']
+	props: ['supermarket', 'showShareButton', 'openMatch', 'isSearching']
 });
 
 var app = new Vue(
@@ -16,6 +16,9 @@ var app = new Vue(
 		prices: [],
 		pricesLastUpdated: null,
 		shoppinglist: "",
+		matchChoices: [],
+		openMatch: null,
+		priceRequest: 0,
 		products: [],
 		supermarkets: [],
 		selectedSupermarket: null,
@@ -51,6 +54,7 @@ var app = new Vue(
 		},
 		shopMultipleSupermarkets: function(val)
 		{
+			this.invalidatePrices();
 			if (!val)
 			{
 				this.showSupermarketSelection = false;
@@ -81,54 +85,84 @@ var app = new Vue(
 				console.error("Failed to load supermarkets", e);
 			}
 		},
+		invalidatePrices: function()
+		{
+			this.priceRequest++;
+			this.isSearching = false;
+			this.openMatch = null;
+		},
+		refreshPrices: async function(inPlan, { scroll = true, choices = this.matchChoices, expectedMatch = null } = {})
+		{
+			const request = ++this.priceRequest;
+			const storeCodes = [...this.selectedSupermarketCodes];
+			const maxStores = this.maxSupermarkets;
+			this.isSearching = true;
+			this.openMatch = null;
+
+			try
+			{
+				const prices = await getShoppingListPrices(this.shoppinglist, this.language, choices);
+				if (request !== this.priceRequest) return;
+				if (expectedMatch && !prices.find(store => store.code === expectedMatch.storeCode)?.products.some(product =>
+					product.matchKey === expectedMatch.matchKey && product.productId === expectedMatch.productId && product.isManualMatch
+				))
+				{
+					alert(this.t('matchUnavailable'));
+					return;
+				}
+
+				if (inPlan)
+				{
+					this.shoppingPlan = shoppingPlanForChoices(prices, maxStores, storeCodes, choices);
+					this.selectedSupermarket = null;
+				}
+				else
+				{
+					const selectedCode = this.selectedSupermarket?.code;
+					this.supermarkets = prices.sort((a, b) => a.totalPrice - b.totalPrice);
+					this.selectedSupermarket = prices.find(store => store.code === selectedCode) ?? null;
+				}
+				this.pricesLastUpdated = checkjebon.pricesLastUpdated();
+				if (choices !== this.matchChoices)
+				{
+					this.matchChoices = choices;
+					this.saveShoppinglist();
+				}
+				if (scroll && (inPlan || !this.selectedSupermarket))
+				{
+					this.$nextTick(() => {
+						document.getElementById(inPlan ? 'shopping-plan' : 'supermarkets')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+					});
+				}
+				return true;
+			}
+			catch (error)
+			{
+				if (request === this.priceRequest)
+				{
+					alert(this.t(inPlan ? 'planError' : 'searchError'));
+					console.error(error);
+				}
+			}
+			finally
+			{
+				if (request === this.priceRequest) this.isSearching = false;
+			}
+		},
 		createShoppingPlan: async function(scrollToResults = true)
 		{
-			if (this.selectedSupermarketCodes.length === 0) {
+			if (!this.selectedSupermarketCodes.length || !this.maxSupermarkets || !this.shoppinglist?.trim())
+			{
+				this.invalidatePrices();
 				this.shoppingPlan = null;
 				return;
 			}
-			
-			this.isSearching = true;
-			
-			try {
-				const prices = await getShoppingListPrices(this.shoppinglist, this.language);
-				const result = checkjebon.getShoppingPlanForPrices(prices, this.maxSupermarkets, this.selectedSupermarketCodes);
-				const selectedStores = prices.filter(store => this.selectedSupermarketCodes.includes(store.code));
-				const best = selectedStores.reduce((cheapest, store) => store.totalPrice < cheapest.totalPrice ? store : cheapest);
-				const plan = {
-					...result,
-					supermarkets: result.supermarkets.map(store => ({
-						...store,
-						totalPrice: store.products.reduce((total, product) => total + (product.price ?? 0), 0)
-					})),
-					bestSingleTotal: best.totalPrice,
-					bestSingleName: best.name,
-					totalSavings: best.totalPrice - result.totalCost,
-					needsReview: result.supermarkets.some(store => store.products.some(product => product.needsReview))
-				};
-				this.pricesLastUpdated = checkjebon.pricesLastUpdated();
-				this.selectedSupermarket = null;
-				this.shoppingPlan = plan;
-				
-				if (scrollToResults) {
-					setTimeout(function()
-					{
-						document.getElementById("shopping-plan")?.scrollIntoView({behavior: "smooth", block: "start"});
-					}, 100);
-				}
-				
-			} catch (e) {
-				alert(this.t('planError'));
-				console.error(e);
-			}
-			this.isSearching = false;
+			await this.refreshPrices(true, { scroll: scrollToResults });
 		},
 		updateShoppingPlan: function()
 		{
-			if (this.shoppingPlan)
-			{
-				this.createShoppingPlan(false);
-			}
+			this.saveShoppinglist();
+			if (this.shoppingPlan || this.isSearching) this.createShoppingPlan(false);
 		},
 		example: function()
 		{
@@ -220,59 +254,106 @@ var app = new Vue(
 		},
 		search: async function()
 		{
-			if (!this.shoppinglist || this.shoppinglist.trim() === "") {
-				this.supermarkets = [];
+			if (!this.shoppinglist?.trim())
+			{
+				this.update();
 				return;
 			}
 
-			if (this.shopMultipleSupermarkets) {
+			if (this.shopMultipleSupermarkets)
+			{
+				this.invalidatePrices();
 				this.showSupermarketSelection = true;
 				this.shoppingPlan = null;
 				this.selectedSupermarket = null;
 				this.supermarkets = [];
-				if (this.availableSupermarkets.length === 0) {
-					await this.loadSupermarkets();
-				}
-				setTimeout(function()
-				{
-					const el = document.getElementById("supermarket-selection");
-					if(el) el.scrollIntoView({behavior: "smooth", block: "start"});
-				}, 100);
+				if (this.availableSupermarkets.length === 0) await this.loadSupermarkets();
+				this.$nextTick(() => {
+					document.getElementById('supermarket-selection')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+				});
 				return;
 			}
 
-			this.isSearching = true;
 			this.showSupermarketSelection = false;
 			this.shoppingPlan = null;
-			try {
-				this.supermarkets = await getShoppingListPrices(this.shoppinglist, this.language);
-				this.pricesLastUpdated = checkjebon.pricesLastUpdated();
-				this.supermarkets.sort((a, b) => a.totalPrice - b.totalPrice);
-				if (!this.selectedSupermarket) {
-					setTimeout(function()
-					{
-						document.getElementById("supermarkets")?.scrollIntoView({behavior: "smooth", block: "start"});
-					}, 100);
-				}
-			} catch (e) {
-				alert(this.t('searchError'));
-				console.error(e);
-			}
-			this.isSearching = false;
+			await this.refreshPrices(false);
 		},
 		select: function()
 		{
-			setTimeout(function()
+			this.openMatch = null;
+			this.$nextTick(() => document.getElementById('articles')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+		},
+		focusMatchToggle: function(supermarket, product)
+		{
+			this.$nextTick(() => {
+				document.getElementById('match-toggle-' + supermarket.code + '-' + product.listIndex)?.focus({ preventScroll: true });
+			});
+		},
+		toggleMatch: async function(supermarket, product)
+		{
+			if (this.isSearching) return;
+			if (this.openMatch?.storeCode === supermarket.code && this.openMatch.listIndex === product.listIndex)
 			{
-				document.getElementById("articles")?.scrollIntoView({behavior: "smooth", block: "start"});
-			}, 100);
+				this.openMatch = null;
+				this.focusMatchToggle(supermarket, product);
+				return;
+			}
+
+			const line = this.shoppinglist.split('\n')[product.listIndex];
+			if (!line?.trim()) return;
+			const search = prepareSearchItem(line, product.listIndex, this.language);
+			const drawer = {
+				storeCode: supermarket.code,
+				listIndex: product.listIndex,
+				loading: true,
+				error: false,
+				current: null,
+				options: []
+			};
+			this.openMatch = drawer;
+			try
+			{
+				const { current, alternatives } = await checkjebon.getProductAlternatives(search.query, search, supermarket.code, product);
+				if (this.openMatch !== drawer) return;
+				drawer.current = current;
+				drawer.options = alternatives;
+			}
+			catch (error)
+			{
+				if (this.openMatch === drawer) drawer.error = true;
+			}
+			finally
+			{
+				if (this.openMatch === drawer) drawer.loading = false;
+			}
+		},
+		pickMatch: async function(supermarket, product, option)
+		{
+			const drawer = this.openMatch;
+			if (this.isSearching || drawer?.storeCode !== supermarket.code || drawer.listIndex !== product.listIndex) return;
+			if (option ? !drawer.options.some(candidate => candidate.productId === option.productId) : !product.isManualMatch) return;
+
+			const forPlan = Boolean(this.shoppingPlan);
+			const choices = this.matchChoices
+				.filter(choice => choice.matchKey !== product.matchKey || choice.storeCode !== supermarket.code)
+				.map(choice => option && forPlan && choice.matchKey === product.matchKey ? { ...choice, forPlan: false } : choice);
+			const expectedMatch = option && {
+				matchKey: product.matchKey,
+				storeCode: supermarket.code,
+				productId: option.productId,
+				forPlan
+			};
+			if (expectedMatch) choices.push(expectedMatch);
+			const request = this.priceRequest + 1;
+			await this.refreshPrices(forPlan, { scroll: false, choices, expectedMatch });
+			if (request === this.priceRequest) this.focusMatchToggle(supermarket, product);
 		},
 		check: function(product, event)
 		{
 			const lines = this.shoppinglist.split('\n');
 			const line = lines[product.listIndex];
 			product.checked = event.target.checked;
-			lines[product.listIndex] = (product.checked ? 'x ' : '') + line.replace(/^x /, '');
+			lines[product.listIndex] = (product.checked ? 'x ' : '') + line.replace(/^x\s+/, '');
 			this.shoppinglist = lines.join('\n');
 			this.saveShoppinglist();
 		},
@@ -280,22 +361,20 @@ var app = new Vue(
 		{
 			const lines = this.shoppinglist.split('\n');
 			const line = lines[product.listIndex];
-			const newProduct = window.prompt(message, line.replace(/^x /, ''));
+			const newProduct = window.prompt(message, line.replace(/^x\s+/, ''));
 			if (newProduct?.trim())
 			{
-				lines[product.listIndex] = (line.startsWith('x ') ? 'x ' : '') + newProduct.trim();
+				lines[product.listIndex] = (/^x\s+/.test(line) ? 'x ' : '') + newProduct.trim();
 				this.shoppinglist = lines.join('\n');
+				this.retainMatchChoices();
 				this.saveShoppinglist();
-
-				if (this.shoppingPlan)
+				const request = this.priceRequest + 1;
+				const refreshed = await this.refreshPrices(Boolean(this.shoppingPlan), { scroll: false });
+				if (!refreshed && request === this.priceRequest)
 				{
-					await this.createShoppingPlan(false);
-				}
-				else
-				{
-					const currentCode = this.selectedSupermarket.code;
-					await this.search();
-					this.selectedSupermarket = this.supermarkets.find(s => s.code === currentCode);
+					this.supermarkets = [];
+					this.selectedSupermarket = null;
+					this.shoppingPlan = null;
 				}
 			}
 		},
@@ -304,9 +383,11 @@ var app = new Vue(
 			const url = new URL(window.location.href);
 			url.searchParams.set('lang', this.language);
 			let hash = this.shoppinglist.replace(/%/g, '%25').replace(/\|/g, '%7C').replace(/\n/g, '%0A');
-			if (this.shopMultipleSupermarkets)
+			if (this.shopMultipleSupermarkets || this.matchChoices.length)
 			{
-				hash += '|1|' + this.maxSupermarkets + '|' + this.selectedSupermarketCodes.join(',');
+				hash += '|' + Number(this.shopMultipleSupermarkets) + '|' + (this.maxSupermarkets ?? '') +
+					'|' + this.selectedSupermarketCodes.join(',');
+				if (this.matchChoices.length) hash += '|' + encodeURIComponent(JSON.stringify(this.matchChoices));
 			}
 			url.hash = hash;
 			if (navigator.share)
@@ -345,11 +426,13 @@ var app = new Vue(
 			localStorage.setItem("shopMultipleSupermarkets", this.shopMultipleSupermarkets);
 			localStorage.setItem("maxSupermarkets", this.maxSupermarkets);
 			localStorage.setItem("selectedSupermarketCodes", JSON.stringify(this.selectedSupermarketCodes));
+			localStorage.setItem('checkjebonMatchChoices', JSON.stringify(this.matchChoices));
 		},
 		loadShoppinglist: async function()
 		{
 			// Populate shoppinglist from memory
-			this.shoppinglist = localStorage.getItem("shoppinglist");
+			this.shoppinglist = localStorage.getItem("shoppinglist") ?? '';
+			this.matchChoices = readMatchChoices(localStorage.getItem('checkjebonMatchChoices'));
 			this.shopMultipleSupermarkets = localStorage.getItem("shopMultipleSupermarkets") === "true";
 			this.maxSupermarkets = parseInt(localStorage.getItem("maxSupermarkets")) || null;
 			try {
@@ -365,11 +448,18 @@ var app = new Vue(
 				{
 					const parts = window.location.hash.slice(1).split("|");
 					this.shoppinglist = decodeURI(parts[0]);
+					try {
+						this.matchChoices = readMatchChoices(decodeURIComponent(parts[4] ?? ''));
+					} catch (error) {
+						this.matchChoices = [];
+					}
 					if (parts.length > 1) {
 						this.shopMultipleSupermarkets = parts[1] === "1";
 						this.maxSupermarkets = parseInt(parts[2]) || null;
 						this.selectedSupermarketCodes = parts[3] ? parts[3].split(",") : [];
 					}
+					this.retainMatchChoices();
+					this.saveShoppinglist();
 				}
 				window.location.hash = "";
 			}
@@ -393,8 +483,16 @@ var app = new Vue(
 				this.selectedSupermarket = null;
 			}
 		},
+		retainMatchChoices: function()
+		{
+			if (!this.matchChoices.length) return;
+			const matchKeys = new Set(shoppingListRows(this.shoppinglist).map(row => row.matchKey));
+			this.matchChoices = this.matchChoices.filter(choice => matchKeys.has(choice.matchKey));
+		},
 		update: function()
 		{
+			this.invalidatePrices();
+			this.retainMatchChoices();
 			this.selectedSupermarket = null;
 			this.supermarkets = [];
 			

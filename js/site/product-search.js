@@ -58,22 +58,111 @@ function prepareSearchItem(line, listIndex, language)
 	};
 }
 
-async function getShoppingListPrices(shoppingList, language)
+function shoppingListRows(shoppingList)
 {
-	const items = shoppingList.split('\n')
-		.map((line, index) => line.trim() ? prepareSearchItem(line, index, language) : null)
-		.filter(Boolean);
+	// Keep choices attached to the same item when other lines move or a row
+	// is checked off. Repeated entries each have their own occurrence.
+	const occurrences = new Map();
+	const rows = [];
+	shoppingList.split('\n').forEach((line, listIndex) => {
+		if (!line.trim()) return;
+		const title = line.replace(/^x\s+/, '').trim();
+		const occurrence = occurrences.get(title) ?? 0;
+		occurrences.set(title, occurrence + 1);
+		rows.push({ line, listIndex, matchKey: JSON.stringify([title, occurrence]) });
+	});
+	return rows;
+}
+
+function readMatchChoices(value)
+{
+	try {
+		const choices = JSON.parse(value);
+		if (!Array.isArray(choices)) return [];
+		return choices.filter(choice => choice && typeof choice.matchKey === 'string' &&
+			typeof choice.storeCode === 'string' && typeof choice.productId === 'string' &&
+			typeof choice.forPlan === 'boolean');
+	} catch (error) {
+		return [];
+	}
+}
+
+function basketTotals(products)
+{
+	let matchedCount = 0;
+	let estimatedCount = 0;
+	let unpricedCount = 0;
+	let totalPrice = 0;
+	for (const product of products)
+	{
+		if (!Number.isFinite(product.price)) unpricedCount++;
+		else
+		{
+			totalPrice += product.price;
+			if (product.isEstimate) estimatedCount++;
+			else matchedCount++;
+		}
+	}
+	return {
+		matchedCount,
+		estimatedCount,
+		unpricedCount,
+		totalPrice: Math.round(totalPrice * 100) / 100,
+		notFound: estimatedCount + unpricedCount
+	};
+}
+
+async function getShoppingListPrices(shoppingList, language, choices = [])
+{
+	const choicesByItem = new Map();
+	for (const choice of choices)
+	{
+		if (!choicesByItem.has(choice.matchKey)) choicesByItem.set(choice.matchKey, []);
+		choicesByItem.get(choice.matchKey).push([choice.storeCode, choice.productId]);
+	}
+	const items = shoppingListRows(shoppingList).map(({ line, listIndex, matchKey }) => ({
+		...prepareSearchItem(line, listIndex, language),
+		matchKey,
+		overrides: choicesByItem.has(matchKey) ? Object.fromEntries(choicesByItem.get(matchKey)) : undefined
+	}));
 	const results = await checkjebon.getPricesForProducts(items.map(item => item.query), items);
 	return results.map(store => {
 		const products = store.products.map((product, index) => {
-			const { originalQuery, listIndex, checked, searchedName, scoreName } = items[index];
-			return { ...product, originalQuery, listIndex, checked, searchedName, needsReview: Boolean(scoreName) && product.price == null };
+			const { originalQuery, listIndex, matchKey, checked, searchedName, scoreName, overrides } = items[index];
+			const isManualMatch = Boolean(product.productId && overrides?.[store.code] === product.productId);
+			return {
+				...product, originalQuery, listIndex, matchKey, checked, searchedName, isManualMatch,
+				needsReview: Boolean(scoreName) && product.price == null
+			};
 		});
-		return {
-			...store,
-			products,
-			totalPrice: products.reduce((total, product) => total + (product.price ?? 0), 0),
-			notFound: products.filter(product => product.isEstimate || product.price == null).length
-		};
+		return { ...store, products, ...basketTotals(products) };
 	});
+}
+
+function shoppingPlanForChoices(prices, maxStores, storeCodes, choices)
+{
+	const stores = prices.filter(store => storeCodes.includes(store.code));
+	const byCode = new Map(stores.map(store => [store.code, store]));
+	const pinned = new Map();
+	const pinnedStores = new Set();
+	// If the store limit changes, the most recent explicit choices take
+	// precedence among stores still allowed in the plan.
+	for (const choice of [...choices].reverse())
+	{
+		if (!choice.forPlan || (!pinnedStores.has(choice.storeCode) && pinnedStores.size >= maxStores)) continue;
+		const product = byCode.get(choice.storeCode)?.products.find(row => row.matchKey === choice.matchKey);
+		if (!product?.isManualMatch || product.productId !== choice.productId || pinned.has(product.listIndex)) continue;
+		pinned.set(product.listIndex, choice.storeCode);
+		pinnedStores.add(choice.storeCode);
+	}
+	const result = checkjebon.getShoppingPlanForPrices(prices, maxStores, storeCodes, pinned);
+	const best = stores.reduce((cheapest, store) => store.totalPrice < cheapest.totalPrice ? store : cheapest);
+	return {
+		...result,
+		supermarkets: result.supermarkets.map(store => ({ ...store, ...basketTotals(store.products) })),
+		bestSingleTotal: best.totalPrice,
+		bestSingleName: best.name,
+		totalSavings: Math.round((best.totalPrice - result.totalCost) * 100) / 100,
+		needsReview: result.supermarkets.some(store => store.products.some(product => product.needsReview))
+	};
 }

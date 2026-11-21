@@ -34,7 +34,7 @@ async function getPricesForProducts(productNames, searches = []) {
 
   const allProductMatches = productNames.map((name, index) => {
     const search = searches[index];
-    const title = productTitleKey(search?.title ?? name.trim().replace(/^x\s+/i, ''));
+    const title = queryTitleKey(name, search);
     const exactMatches = titleIndexes.map(titles => titles.get(title));
     // A pasted product title identifies that listing. Do not fill other
     // stores' prices with a different product merely sharing its words.
@@ -46,20 +46,26 @@ async function getPricesForProducts(productNames, searches = []) {
   });
 
   return supermarkets.map((supermarket, supermarketIndex) => {
-    const baseUrl = supermarket.u || '';
     const foundProducts = productNames.map((name, prodIdx) => {
-      const match = allProductMatches[prodIdx][supermarketIndex];
+      const search = searches[prodIdx];
+      let match = allProductMatches[prodIdx][supermarketIndex];
+      const overrideId = search?.overrides?.[supermarket.n];
+      if (overrideId) {
+        const title = queryTitleKey(name, search);
+        const exactOnly = search.specificTitle && titleIndexes.some(titles => titles.has(title));
+        const override = candidateProducts(supermarket.d, name, search, title, exactOnly)
+          .find(product => getProductId(product) === overrideId);
+        if (override) match = override;
+      }
       if (match) {
         return {
-          name: match.n,
-          link: match.l ? baseUrl + match.l : null,
-          price: roundPrice(match.p),
-          amount: match.s,
+          ...describeProduct(match, supermarket),
           isEstimate: false,
           originalQuery: name
         };
       } else {
-        // Fallback: average price across other supermarkets
+        // Estimate from automatic matches. A manually chosen pack might have
+        // a different size and belongs only to its own store's basket.
         let priceSum = 0;
         let priceCount = 0;
         allProductMatches[prodIdx].forEach((other, i) => {
@@ -88,6 +94,45 @@ async function getPricesForProducts(productNames, searches = []) {
   });
 }
 
+async function getProductAlternatives(name, search, storeCode, currentMatch) {
+  const supermarkets = await getSupermarketsJson();
+  const store = supermarkets.find(supermarket => supermarket.n === storeCode);
+  if (!store) return { current: null, alternatives: [] };
+
+  const title = queryTitleKey(name, search);
+  const exactOnly = search?.specificTitle && supermarkets.some(supermarket => indexProductTitles(supermarket.d).has(title));
+  const choices = candidateProducts(store.d, name, search, title, exactOnly);
+  let current = null;
+  if (currentMatch?.productId) {
+    for (const product of store.d) {
+      if (product.n && Number.isFinite(product.p) && getProductId(product) === currentMatch.productId &&
+          (!current || product.p < current.p)) current = product;
+    }
+  }
+  const seen = new Set([currentMatch?.productId]);
+  const sizes = new Set([packMeasurement(current?.s)]);
+  const alternatives = [];
+  const sameSize = [];
+  // Prefer a few different measured pack sizes before listing near-duplicates.
+  for (const candidate of choices) {
+    const productId = getProductId(candidate);
+    if (seen.has(productId)) continue;
+    seen.add(productId);
+    const size = packMeasurement(candidate.s);
+    if (!size || sizes.has(size)) {
+      if (sameSize.length < 3) sameSize.push(candidate);
+      continue;
+    }
+    sizes.add(size);
+    alternatives.push(candidate);
+    if (alternatives.length === 3) break;
+  }
+  return {
+    current: current ? describeCandidate(current, store) : null,
+    alternatives: alternatives.concat(sameSize).slice(0, 3).map(product => describeCandidate(product, store))
+  };
+}
+
 /**
  * Returns a Checkjebon.nl link for a given shopping list string.
  * @param {string} shoppingList - The shopping list (one item per line)
@@ -109,6 +154,8 @@ function getCheckjebonLink(shoppingList) {
  * @returns {Date|null} The last modified date of the prices cache, or null if not available
  */
 function pricesLastUpdated() {
+  if (cachedCatalogue) return cachedCatalogue.lastModified;
+
   let lastModified = null;
   if (isNode) {
     try {
@@ -146,7 +193,7 @@ async function getOptimalShoppingPlan(productNames, maxSupermarketVisitCount, se
 }
 
 // Plan from the same validated prices shown in the single-store comparison.
-function getShoppingPlanForPrices(allPrices, maxSupermarketVisitCount, selectedSupermarketCodes) {
+function getShoppingPlanForPrices(allPrices, maxSupermarketVisitCount, selectedSupermarketCodes, fixedAssignments = new Map()) {
 
   // Filter to only selected supermarkets
   const selectedSupermarkets = allPrices.filter(s =>
@@ -161,6 +208,16 @@ function getShoppingPlanForPrices(allPrices, maxSupermarketVisitCount, selectedS
   // For each product, track which supermarket has the best price
   const productCount = selectedSupermarkets[0].products.length;
   const supermarketCount = selectedSupermarkets.length;
+  const pinnedStores = new Map();
+  if (fixedAssignments.size > 0) {
+    const storeIndices = new Map(selectedSupermarkets.map((store, index) => [store.code, index]));
+    for (let productIndex = 0; productIndex < productCount; productIndex++) {
+      const { listIndex } = selectedSupermarkets[0].products[productIndex];
+      const storeIndex = storeIndices.get(fixedAssignments.get(listIndex));
+      const pinned = selectedSupermarkets[storeIndex]?.products[productIndex];
+      if (Number.isFinite(pinned?.price) && !pinned.isEstimate) pinnedStores.set(productIndex, storeIndex);
+    }
+  }
 
   // Create price matrix: priceMatrix[productIndex][supermarketIndex] = price (or null)
   const priceMatrix = [];
@@ -180,7 +237,8 @@ function getShoppingPlanForPrices(allPrices, maxSupermarketVisitCount, selectedS
     priceMatrix,
     selectedSupermarkets,
     productCount,
-    maxSupermarketVisitCount
+    maxSupermarketVisitCount,
+    pinnedStores
   );
 
   return bestCombination;
@@ -192,11 +250,16 @@ function getShoppingPlanForPrices(allPrices, maxSupermarketVisitCount, selectedS
  * @param {Array} supermarkets - Array of supermarket objects
  * @param {string[]} productNames - Product names
  * @param {number} maxStores - Maximum number of stores to visit
+ * @param {Map<number, number>} pinnedStores - Store index for each pinned product index
  * @returns {Object} Best combination with totalCost and supermarkets
  */
-function findBestSupermarketCombination(priceMatrix, supermarkets, productCount, maxStores) {
+function findBestSupermarketCombination(priceMatrix, supermarkets, productCount, maxStores, pinnedStores) {
   const supermarketCount = supermarkets.length;
   const supermarketIndices = Array.from({ length: supermarketCount }, (_, i) => i);
+  const requiredStores = [...new Set(pinnedStores.values())];
+  if (requiredStores.length > maxStores) {
+    throw new Error('Pinned stores exceed the maximum number of visits');
+  }
 
   let bestSolution = {
     totalCost: Infinity,
@@ -224,9 +287,10 @@ function findBestSupermarketCombination(priceMatrix, supermarkets, productCount,
   }
 
   // Iterate over combination sizes from 1 to maxStores
-  for (let k = 1; k <= maxStores; k++) {
+  for (let k = Math.max(1, requiredStores.length); k <= maxStores; k++) {
     const combinations = getCombinations(supermarketIndices, k);
     for (const combination of combinations) {
+      if (!requiredStores.every(store => combination.includes(store))) continue;
       let currentCost = 0;
       let currentCoveredCount = 0;
       const currentAssignments = new Array(productCount).fill(-1);
@@ -234,8 +298,10 @@ function findBestSupermarketCombination(priceMatrix, supermarkets, productCount,
       for (let p = 0; p < productCount; p++) {
         let minPrice = Infinity;
         let bestStore = -1;
+        const pinnedStore = pinnedStores.get(p);
 
         for (const s of combination) {
+          if (pinnedStore !== undefined && s !== pinnedStore) continue;
           const price = priceMatrix[p][s];
           if (price !== null && price < minPrice) {
             minPrice = price;
@@ -370,6 +436,57 @@ function productTitleKey(title) {
   return title.normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+function queryTitleKey(name, search) {
+  return productTitleKey(search?.title ?? name.trim().replace(/^x\s+/i, ''));
+}
+
+function getProductId(product) {
+  return JSON.stringify([productTitleKey(product.n), String(product.s ?? '').toLowerCase().trim(), product.l ?? '']);
+}
+
+function describeProduct(product, store) {
+  return {
+    productId: getProductId(product),
+    name: product.n,
+    link: product.l ? (store.u || '') + product.l : null,
+    price: roundPrice(product.p),
+    amount: product.s
+  };
+}
+
+function describeCandidate(product, store) {
+  const candidate = describeProduct(product, store);
+  return {
+    ...candidate,
+    unitPrice: getUnitPrice(candidate.price, candidate.amount)
+  };
+}
+
+function packMeasurement(packageSize) {
+  if (typeof packageSize !== 'string') return null;
+
+  // Compute the rate only from a measured pack. A capacity in a product's
+  // title or a pack counted in pieces does not describe its net contents.
+  let label = packageSize.trim().replace(/\b(kilogram|kilo|gram|centiliter|deciliter|milliliter|mililiter|liter)s\b/gi, '$1');
+  if (/^per\s+(?:kg|kilo|kilogram|l|liter)$/i.test(label)) label = label.replace(/^per\s+/i, '1 ');
+  label = label.replace(/^(?:per\s+|ca\.?\s*|circa\s+)/i, '');
+  const amount = getAmount(label);
+  if (!amount || !label.startsWith(amount)) return null;
+  const remainder = label.slice(amount.length).trim();
+  if (remainder && !/^\((?:ca\.?\s*)?\d+\s+stuks?\)$/i.test(remainder)) return null;
+
+  return convertAmountToBase(amount);
+}
+
+function getUnitPrice(price, packageSize) {
+  const measurement = packMeasurement(packageSize);
+  if (!measurement) return null;
+  const [quantity, unit] = measurement.split(' ');
+  const perUnit = price * 1000 / Number(quantity);
+  if (!Number.isFinite(perUnit) || Number(quantity) <= 0) return null;
+  return { price: roundPrice(perUnit), unit: unit === 'gram' ? 'kg' : 'L' };
+}
+
 function indexProductTitles(products) {
   const cached = indexedTitles.get(products);
   if (cached) return cached;
@@ -389,7 +506,7 @@ function escapeRegExp(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function findProducts(products, value) {
+function findProducts(products, value, allowFuzzy = true) {
   // Ignore leading 'x ' (already bought) for search, but keep original for originalQuery
   let searchValue = value.trim().replace(/^x\s+/i, '');
   const amount = getAmount(searchValue);
@@ -399,7 +516,7 @@ function findProducts(products, value) {
   let productMatches = products.filter(product =>
     patterns.every(pattern => pattern.test(product.n))
   );
-  if (productMatches.length === 0) {
+  if (productMatches.length === 0 && allowFuzzy) {
     // Fallback: fuzzy match
     const fallbackPattern = [new RegExp(Array.from(searchValue.replace(/\s/g, ""), escapeRegExp).join(".*"), "i")];
     productMatches = products.filter(product =>
@@ -421,6 +538,20 @@ function findProducts(products, value) {
   return productMatches;
 }
 
+function isRegularListing(product) {
+  return product.n && Number.isFinite(product.p) && product.p > 0.01 && !/\bcoupon\b/i.test(product.n);
+}
+
+function scoreProduct(product, search, minimum) {
+  if (!isRegularListing(product)) return 0;
+  const score = search.scoreName(product.n);
+  if (!score || !minimum) return score;
+
+  // Several stores include the pack size only in the product title.
+  const amount = getAmount(product.s || '') || getAmount(product.n);
+  return compareMinimumAmounts(convertAmountToBase(amount), minimum) ? score : 0;
+}
+
 function findProduct(products, name, search) {
   if (!search?.scoreName) return findProducts(products, name)[0];
 
@@ -428,20 +559,37 @@ function findProduct(products, name, search) {
   let cheapest;
   let bestScore = 0;
   for (const product of products) {
-    if (!Number.isFinite(product.p) || product.p <= 0.01 || /\bcoupon\b/i.test(product.n)) continue;
-    const score = search.scoreName(product.n);
+    const score = scoreProduct(product, search, minimum);
     if (score === 0 || score < bestScore) continue;
-    // Several stores include the pack size only in the product title.
-    if (minimum) {
-      const amount = getAmount(product.s || '') || getAmount(product.n);
-      if (!compareMinimumAmounts(convertAmountToBase(amount), minimum)) continue;
-    }
     if (!cheapest || score > bestScore || product.p < cheapest.p) {
       cheapest = product;
       bestScore = score;
     }
   }
   return cheapest;
+}
+
+function candidateProducts(products, name, search, title, exactOnly) {
+  const exact = products.filter(product => isRegularListing(product) && productTitleKey(product.n) === title);
+  exact.sort((left, right) => left.p - right.p);
+  if (exactOnly) return exact;
+
+  const exactProducts = new Set(exact);
+  if (!search?.scoreName) {
+    const direct = findProducts(products, name, false)
+      .filter(product => isRegularListing(product) && !exactProducts.has(product));
+    return exact.concat(direct);
+  }
+
+  const minimum = convertAmountToBase(search.amount);
+  const ranked = [];
+  for (const product of products) {
+    if (exactProducts.has(product)) continue;
+    const score = scoreProduct(product, search, minimum);
+    if (score) ranked.push({ product, score });
+  }
+  ranked.sort((left, right) => right.score - left.score || left.product.p - right.product.p);
+  return exact.concat(ranked.map(entry => entry.product));
 }
 
 function roundPrice(price) {
@@ -457,8 +605,13 @@ function roundPrice(price) {
 // --- NODE.JS AND BROWSER-COMPATIBLE FETCH/CACHE HELPERS ---
 const CACHE_KEY = 'supermarkets.cache.json';
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+let cachedCatalogue;
+let pendingCatalogue;
 
 function getCache() {
+  if (cachedCatalogue && Date.now() - cachedCatalogue.fetchedAt < CACHE_TTL_MS) {
+    return cachedCatalogue.data;
+  }
   if (isNode) {
     try {
       const fs = require('fs');
@@ -467,6 +620,7 @@ function getCache() {
         const parsed = JSON.parse(raw);
         if (parsed && parsed.data && Array.isArray(parsed.data) && parsed.fetchedAt) {
           if (Date.now() - parsed.fetchedAt < CACHE_TTL_MS) {
+            cachedCatalogue = parsed;
             return parsed.data;
           }
         }
@@ -479,6 +633,7 @@ function getCache() {
         const parsed = JSON.parse(raw);
         if (parsed && parsed.data && Array.isArray(parsed.data) && parsed.fetchedAt) {
           if (Date.now() - parsed.fetchedAt < CACHE_TTL_MS) {
+          cachedCatalogue = parsed;
             return parsed.data;
           }
         }
@@ -490,6 +645,9 @@ function getCache() {
 
 function setCache(data, lastModified) {
   const cacheObj = { fetchedAt: Date.now(), data, lastModified: lastModified || null };
+  // The catalogue may exceed the browser's localStorage limit. Keep it in
+  // memory so opening a product picker never has to reload the full feed.
+  cachedCatalogue = cacheObj;
   if (isNode) {
     try {
       const fs = require('fs');
@@ -544,13 +702,19 @@ function fetchSupermarketsJson() {
 async function getSupermarketsJson() {
   const cached = getCache();
   if (cached) return cached;
-  return await fetchSupermarketsJson();
+  if (!pendingCatalogue) {
+    pendingCatalogue = fetchSupermarketsJson().finally(() => {
+      pendingCatalogue = null;
+    });
+  }
+  return pendingCatalogue;
 }
 
 
 const exported = {
   getAmount,
   getPricesForProducts,
+  getProductAlternatives,
   getOptimalShoppingPlan,
   getShoppingPlanForPrices,
   getSupermarkets,
