@@ -38,7 +38,7 @@ function withCatalogue(data)
 		fetch: async () => ({ ok: true, headers: new Headers(), json: async () => data })
 	});
 	browser.window = browser;
-	for (const file of ['js/checkjebon/checkjebon.js', 'js/site/product-search.js'])
+	for (const file of ['js/checkjebon/checkjebon.js', 'js/site/grocery-terms.js', 'js/site/product-search.js'])
 	{
 		vm.runInContext(readFileSync(resolve(__dirname, '..', file), 'utf8'), browser, { filename: file });
 	}

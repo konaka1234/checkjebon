@@ -72,7 +72,7 @@ const messages = {
 		language: 'Language',
 		intro: 'See what the same groceries would cost at different supermarkets and save on your next shop.',
 		shoppingList: 'Enter your shopping list',
-		placeholder: 'Type one item per line.\n\nsemi-skimmed milk\nwholemeal bread\nbrown rice\nbananas\ngarlic sauce\nfalafel\n\nAdd the brand name if you are looking for something specific. If an English search misses an item, try its Dutch name.',
+		placeholder: 'Type one item per line in English or Dutch.\n\nsemi-skimmed milk\nvolkoren brood\nbrown rice\nbananas\nknoflooksaus\nfalafel\n\nAdd the brand name or paste the full product name if you are looking for something specific.',
 		exampleList: '1.5 litres semi-skimmed milk\nGarlic sauce\nWholemeal bread\nBrown rice\nBananas\n1 litre Coca-Cola\nChopped tomatoes\nBaking powder\n',
 		multipleStores: 'Shop at multiple supermarkets',
 		searching: 'Searching...',

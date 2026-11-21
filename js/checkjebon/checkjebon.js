@@ -25,16 +25,25 @@ async function getSupermarkets() {
  * Rounds all prices to two decimals.
  * Downloads supermarkets.json from checkjebon.nl and caches for 1 hour.
  * @param {string[]} productNames
- * @param {Array<Function|undefined>} nameMatchers Optional strict name matcher per query.
+ * @param {Array<Object|undefined>} searches Optional title and matching rules per query.
  * @returns {Promise<Array>} Array of supermarkets with found products and their verbose info
  */
-async function getPricesForProducts(productNames, nameMatchers = []) {
+async function getPricesForProducts(productNames, searches = []) {
   const supermarkets = await getSupermarketsJson();
+  const titleIndexes = supermarkets.map(store => indexProductTitles(store.d));
 
-  // For each product, precompute prices across all supermarkets for fallback
-  const allProductMatches = productNames.map((name, index) =>
-    supermarkets.map(s => findProduct(s.d, name, nameMatchers[index]))
-  );
+  const allProductMatches = productNames.map((name, index) => {
+    const search = searches[index];
+    const title = productTitleKey(search?.title ?? name.trim().replace(/^x\s+/i, ''));
+    const exactMatches = titleIndexes.map(titles => titles.get(title));
+    // A pasted product title identifies that listing. Do not fill other
+    // stores' prices with a different product merely sharing its words.
+    if (search?.specificTitle && exactMatches.some(Boolean)) return exactMatches;
+
+    return supermarkets.map((store, storeIndex) =>
+      exactMatches[storeIndex] || findProduct(store.d, name, search)
+    );
+  });
 
   return supermarkets.map((supermarket, supermarketIndex) => {
     const baseUrl = supermarket.u || '';
@@ -321,7 +330,8 @@ const unitofmeasures = [
 ];
 
 const unitofmeasurePattern = new RegExp(
-  "([\\d\\.,]+)\\s?(" + unitofmeasures.map(unit => unit.name).join("|") + ")\\b", "i"
+  "(?:(\\d+)\\s*[x×]\\s*)?(\\d+(?:[.,]\\d+)?)\\s*(" +
+  unitofmeasures.map(unit => unit.name).join("|") + ")\\b", "i"
 );
 
 function getAmount(value) {
@@ -332,8 +342,9 @@ function getAmount(value) {
 function convertAmountToBase(value) {
   if (value && unitofmeasurePattern.test(value)) {
     const amount = value.match(unitofmeasurePattern);
-    const unit = unitofmeasures.find(unit => unit.name === amount[2].toLowerCase());
-    return (parseFloat(amount[1].replace(",", ".")) * unit.conversion) + " " + unit.unit;
+    const unit = unitofmeasures.find(unit => unit.name === amount[3].toLowerCase());
+    const itemCount = Number(amount[1] || 1);
+    return (itemCount * parseFloat(amount[2].replace(",", ".")) * unit.conversion) + " " + unit.unit;
   }
   return value;
 }
@@ -353,18 +364,44 @@ function compareMinimumAmounts(productAmount, searchAmount) {
 }
 
 // --- PRODUCT SEARCH LOGIC ---
+const indexedTitles = new WeakMap();
+
+function productTitleKey(title) {
+  return title.normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function indexProductTitles(products) {
+  const cached = indexedTitles.get(products);
+  if (cached) return cached;
+
+  const titles = new Map();
+  for (const product of products) {
+    if (!product.n || !Number.isFinite(product.p)) continue;
+    const title = productTitleKey(product.n);
+    const current = titles.get(title);
+    if (!current || product.p < current.p) titles.set(title, product);
+  }
+  indexedTitles.set(products, titles);
+  return titles;
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function findProducts(products, value) {
   // Ignore leading 'x ' (already bought) for search, but keep original for originalQuery
   let searchValue = value.trim().replace(/^x\s+/i, '');
   const amount = getAmount(searchValue);
   if (amount) searchValue = searchValue.replace(amount, "");
-  const patterns = searchValue.trim().split(/\s/g).filter(p => p).map(p => new RegExp(p.replace(/\s/g, ""), "i"));
+  const patterns = searchValue.trim().split(/\s+/).filter(Boolean).map(p => new RegExp(escapeRegExp(p), "i"));
+  if (patterns.length === 0) return [];
   let productMatches = products.filter(product =>
     patterns.every(pattern => pattern.test(product.n))
   );
   if (productMatches.length === 0) {
     // Fallback: fuzzy match
-    const fallbackPattern = [new RegExp(searchValue.replace(/\s/g, "").split("").join(".*"), "i")];
+    const fallbackPattern = [new RegExp(Array.from(searchValue.replace(/\s/g, ""), escapeRegExp).join(".*"), "i")];
     productMatches = products.filter(product =>
       fallbackPattern.every(pattern => pattern.test(product.n))
     );
@@ -384,17 +421,25 @@ function findProducts(products, value) {
   return productMatches;
 }
 
-function findProduct(products, name, matchesName) {
-  if (!matchesName) return findProducts(products, name)[0];
+function findProduct(products, name, search) {
+  if (!search?.scoreName) return findProducts(products, name)[0];
 
-  const minimum = convertAmountToBase(getAmount(name));
+  const minimum = convertAmountToBase(search.amount);
   let cheapest;
+  let bestScore = 0;
   for (const product of products) {
-    if (!Number.isFinite(product.p) || !matchesName(product.n)) continue;
+    if (!Number.isFinite(product.p) || product.p <= 0.01 || /\bcoupon\b/i.test(product.n)) continue;
+    const score = search.scoreName(product.n);
+    if (score === 0 || score < bestScore) continue;
     // Several stores include the pack size only in the product title.
-    const amount = convertAmountToBase(product.s || getAmount(product.n));
-    if (minimum && !compareMinimumAmounts(amount, minimum)) continue;
-    if (!cheapest || product.p < cheapest.p) cheapest = product;
+    if (minimum) {
+      const amount = getAmount(product.s || '') || getAmount(product.n);
+      if (!compareMinimumAmounts(convertAmountToBase(amount), minimum)) continue;
+    }
+    if (!cheapest || score > bestScore || product.p < cheapest.p) {
+      cheapest = product;
+      bestScore = score;
+    }
   }
   return cheapest;
 }

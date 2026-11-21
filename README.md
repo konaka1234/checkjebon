@@ -19,8 +19,9 @@ You can share your current shopping list with family members or friends at any t
 # Language and local development
 
 Choose **English** in the language menu or open the page with `?lang=en`. The
-site remembers your language preference. Shopping lists accept Dutch and common
-English grocery terms, such as `500 g chicken drumsticks` and `Oatly oat milk`.
+site remembers your language preference. You can mix Dutch and common English
+grocery terms in either interface, such as `500 g chicken drumsticks` and
+`Oatly haverdrank`.
 Results show the supermarket's original product names. Items without a reliable
 match are flagged for review and left out of the total. You can edit the search
 term from the result and try the supermarket's Dutch product name.
@@ -28,8 +29,8 @@ term from the result and try the supermarket's Dutch product name.
 To run the site locally, run `python3 -m http.server 8000` from the repository
 root and open `http://localhost:8000/?lang=en`. The app uses a local copy of
 `checkjebon-js` with support for stricter search rules. It still fetches price
-data from Checkjebon.nl. Run `node --test` to check the bilingual search and
-shopping-plan regression cases.
+data from Checkjebon.nl. Run `node --test` to audit catalogue titles and check the
+bilingual search and shopping-plan regression cases.
 
 # Including in other products
 
@@ -73,11 +74,16 @@ Some supermarkets do not provide prices for their products online or are not yet
 
 # Product selection algorithm
 
-For any product added to the shopping list, Checkjebon.nl tries to take a best guess at what you actually meant. Sometimes this may result in not seeing what you expect, simply because other products come up cheaper. In general, first an exact match by name is attempted. If there was no exact match, a fuzzy search will be applied, compiling a list of all products that contain the words from the shopping list item. The fuzzy search finds products based on if they contain all the letters from your shopping list item in the same order as they are given, but not necessarily right next to each other. For example, `milk` will find `skiM mILK` as well as `whole MILK`. When an amount in liter or kilogram is given, all products below the given amount are filtered out unless this returns zero results, in which case the filter is undone. Finally, products are first ordered by the string length of the fuzzy search (so `whole MILK`=>4 goes before `skiM mILK`=>6) in an attempt to find the closed possible match, those results are then ordered by price, and finally the top item from that list is returned. 
+An exact supermarket product title takes priority over grocery aliases. Matching
+ignores case and extra spaces. If a supermarket lists the same title at several
+prices, the comparison uses the cheapest listing. Add a minimum package size
+to distinguish sizes when they share a title, for example `500 g rode linzen`.
 
-The algorithm works better when supplying exactly what you are looking for. Note that generic names like `milk` are not well suited for this even though in in day to day live that would be enough to write down since you will make the choice between `skim milk` or `whole milk` once you get to the cooling compartment. The same goes for products like `butter` (`salted butter`, `whipped butter`, `cream butter`, etc).
-
-When no prices are found for a specific product for any of the given supermarkets, a price estimate is used based on the average price for that product among other supermarkets.
+For general items, the grocery dictionary maps English and Dutch terms to the
+relevant Dutch catalogue terms. English mode also accepts literal Dutch names
+when a term is outside the dictionary. The Dutch mode keeps fuzzy search for
+unrecognized terms. When a supermarket lacks a match, any price estimate is based
+on matches at other supermarkets. Items flagged for review have no price in the total.
 
 # Receipt scanning
 
