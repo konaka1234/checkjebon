@@ -1,48 +1,3 @@
-// Global filters
-Vue.filter('formatPrice', function(value)
-{
-	if (value && value > 0)
-	{
-		return value.toFixed(2).replace(".", ",");
-	}
-	else
-	{
-		return "-";
-	}
-});
-
-Vue.filter('formatAmount', function(value)
-{
-	var pattern = new RegExp("([\\d]+) (gram|milliliter)", "i");
-
-	if (value && pattern.test(value))
-	{
-		var amount = value.match(pattern);
-		if (amount[2].toLowerCase() == "gram" && amount[1] >= 1000)
-		{
-			return (amount[1] / 1000) + " kilogram";
-		}
-		else if (amount[2].toLowerCase() == "milliliter" && amount[1] >= 1000)
-		{
-			return (amount[1] / 1000) + " liter";
-		}
-		else
-		{
-			return value.toLowerCase();
-		}
-	}
-	else
-	{
-		return value?.toLowerCase();
-	}
-});
-
-Vue.filter('formatCount', function(value)
-{
-	// Add thousand separator
-	return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
-});
-
 Vue.component('share-button', {
 	template: '#share-button-template'
 });
@@ -57,6 +12,7 @@ var app = new Vue(
 	el: "#checkjebon",
 	data:
 	{
+		language: initialLanguage(),
 		prices: [],
 		pricesLastUpdated: null,
 		shoppinglist: "",
@@ -71,8 +27,24 @@ var app = new Vue(
 		shoppingPlan: null,
 		showSupermarketSelection: false
 	},
+	computed:
+	{
+		compareLabel: function()
+		{
+			if (this.isSearching) return this.t('searching');
+			return this.t(this.shopMultipleSupermarkets ? 'pickStores' : 'compare');
+		}
+	},
 	watch:
 	{
+		language: function(language)
+		{
+			localStorage.setItem('checkjebonLanguage', language);
+			const page = new URL(window.location.href);
+			page.searchParams.set('lang', language);
+			window.history.replaceState(window.history.state, '', page);
+			this.updatePageLanguage();
+		},
 		shopMultipleSupermarkets: function(val)
 		{
 			if (!val)
@@ -87,6 +59,16 @@ var app = new Vue(
 	},
 	methods:
 	{
+		updatePageLanguage: function()
+		{
+			document.documentElement.lang = this.language;
+			document.title = this.t('pageTitle');
+			document.getElementById('page-description').content = this.t('pageDescription');
+		},
+		explainMissingSupermarkets: function()
+		{
+			alert(this.t('whyMissingMessage'));
+		},
 		loadSupermarkets: async function()
 		{
 			try {
@@ -103,39 +85,36 @@ var app = new Vue(
 			}
 			
 			this.isSearching = true;
-			const productNames = this.shoppinglist.split("\n").filter(product => product.trim() !== "");
+			const search = prepareProductSearch(this.shoppinglist);
 			
 			try {
 				const result = await checkjebon.getOptimalShoppingPlan(
-					productNames,
+					search.queries,
 					this.maxSupermarkets,
 					this.selectedSupermarketCodes
 				);
 				
-				// Initialize checked state based on originalQuery
-				result.supermarkets.forEach(s => {
-					s.products.forEach(p => {
-						p.checked = p.originalQuery && p.originalQuery.startsWith("x ");
-					});
-				});
-
-				this.shoppingPlan = result;
-				// Ensure each supermarket in the shopping plan has totalPrice and notFound properties
-				this.shoppingPlan.supermarkets = this.shoppingPlan.supermarkets.map(s => ({
-					...s,
-					products: s.products.map(p => (p)),
-					totalPrice: s.products.reduce((sum, p) => sum + (p.price || 0), 0),
-					notFound: s.products.filter(p => p.isEstimate).length
-				}));
+				this.pricesLastUpdated = checkjebon.pricesLastUpdated();
+				const plan = {
+					...result,
+					supermarkets: result.supermarkets.map(s => ({
+						...s,
+						products: s.products.map(search.restore),
+						totalPrice: s.products.reduce((sum, p) => sum + (p.price || 0), 0),
+						notFound: s.products.filter(p => p.isEstimate).length
+					}))
+				};
 				this.selectedSupermarket = null; // Clear single selection
 
 				// Compute aggregate values for the shopping plan
 				// totalCost: sum of assigned products' prices
-				this.shoppingPlan.totalCost = this.shoppingPlan.supermarkets.reduce((sum, s) => sum + (s.totalPrice || 0), 0);
+				plan.totalCost = plan.supermarkets.reduce((sum, s) => sum + (s.totalPrice || 0), 0);
+				plan.bestSingleTotal = null;
+				plan.totalSavings = 0;
 
 				// Compute best single-supermarket total using current product list and selected supermarket codes
 				try {
-					const allPricesResults = await checkjebon.getPricesForProducts(productNames);
+					const allPricesResults = await checkjebon.getPricesForProducts(search.queries);
 					// Filter to only supermarkets that were selectable for this plan (selectedSupermarketCodes)
 					const filtered = allPricesResults.filter(s => this.selectedSupermarketCodes.includes(s.code));
 					const singleTotals = filtered.map(s => ({
@@ -145,29 +124,24 @@ var app = new Vue(
 					}));
 					if (singleTotals.length > 0) {
 						const best = singleTotals.reduce((min, s) => s.totalPrice < min.totalPrice ? s : min, singleTotals[0]);
-						this.shoppingPlan.bestSingleTotal = best.totalPrice;
-						this.shoppingPlan.bestSingleName = best.name;
-						this.shoppingPlan.totalSavings = (this.shoppingPlan.bestSingleTotal || 0) - this.shoppingPlan.totalCost;
-					} else {
-						this.shoppingPlan.bestSingleTotal = null;
-						this.shoppingPlan.bestSingleName = null;
-						this.shoppingPlan.totalSavings = 0;
+						plan.bestSingleTotal = best.totalPrice;
+						plan.bestSingleName = best.name;
+						plan.totalSavings = best.totalPrice - plan.totalCost;
 					}
 				} catch (e) {
 					console.error('Failed to compute single-shop totals', e);
-					this.shoppingPlan.bestSingleTotal = null;
-					this.shoppingPlan.totalSavings = 0;
 				}
+				this.shoppingPlan = plan;
 				
 				if (scrollToResults) {
 					setTimeout(function()
 					{
-						document.getElementById("shopping-plan").scrollIntoView({behavior: "smooth", block: "start"});
+						document.getElementById("shopping-plan")?.scrollIntoView({behavior: "smooth", block: "start"});
 					}, 100);
 				}
 				
 			} catch (e) {
-				alert('Er is een fout opgetreden bij het maken van het winkelplan.');
+				alert(this.t('planError'));
 				console.error(e);
 			}
 			this.isSearching = false;
@@ -181,8 +155,8 @@ var app = new Vue(
 		},
 		example: function()
 		{
-			this.shoppinglist = "1,5 liter halfvolle melk\nKnoflooksaus\n400 g shoarma\nPita brood\nKipschnitzel\n250 gram kipfilet\n1 kilo bananen\n1 liter coca cola\nkokosbrood\n500 ml soep\nhalvarine\n";
-			this.saveShoppinglist();
+			this.shoppinglist = this.t('exampleList');
+			this.update();
 		},
 		scan: function()
 		{
@@ -293,16 +267,13 @@ var app = new Vue(
 			this.isSearching = true;
 			this.showSupermarketSelection = false;
 			this.shoppingPlan = null;
-			const productNames = this.shoppinglist.split("\n").filter(product => product.trim() !== "");
+			const search = prepareProductSearch(this.shoppinglist);
 			try {
-				const results = await checkjebon.getPricesForProducts(productNames);
+				const results = await checkjebon.getPricesForProducts(search.queries);
 				this.pricesLastUpdated = checkjebon.pricesLastUpdated();
 				this.supermarkets = results.map(s => ({
 					...s,
-					products: s.products.map(p => {
-						p.checked = p.originalQuery.startsWith("x ");
-						return p;
-					}),
+					products: s.products.map(search.restore),
 					totalPrice: s.products.reduce((sum, p) => sum + (p.price || 0), 0),
 					notFound: s.products.filter(p => p.isEstimate).length
 				}));
@@ -310,11 +281,11 @@ var app = new Vue(
 				if (!this.selectedSupermarket) {
 					setTimeout(function()
 					{
-						document.getElementById("supermarkets").scrollIntoView({behavior: "smooth", block: "start"});
+						document.getElementById("supermarkets")?.scrollIntoView({behavior: "smooth", block: "start"});
 					}, 100);
 				}
 			} catch (e) {
-				alert('Er is een fout opgetreden bij het zoeken naar prijzen.');
+				alert(this.t('searchError'));
 				console.error(e);
 			}
 			this.isSearching = false;
@@ -323,98 +294,80 @@ var app = new Vue(
 		{
 			setTimeout(function()
 			{
-				document.getElementById("articles").scrollIntoView({behavior: "smooth", block: "start"});
+				document.getElementById("articles")?.scrollIntoView({behavior: "smooth", block: "start"});
 			}, 100);
 		},
 		check: function(product, event)
 		{
-			// Process checking and unchecking of products
+			const lines = this.shoppinglist.split('\n');
+			const line = lines[product.listIndex];
 			product.checked = event.target.checked;
-			this.shoppinglist = this.shoppinglist.split("\n").map(line => 
-			{
-				if (line.includes(product.originalQuery))
-				{
-					if (line.startsWith("x "))
-					{
-						line = line.substring(2);
-					}
-					if (product.checked)
-					{
-						line = "x " + line;
-					}
-				}
-				return line;
-			}).join("\n");
+			lines[product.listIndex] = (product.checked ? 'x ' : '') + line.replace(/^x /, '');
+			this.shoppinglist = lines.join('\n');
 			this.saveShoppinglist();
 		},
-		edit: async function(product, event, message)
+		edit: async function(product, message)
 		{
-			var newProduct = window.prompt(message, product.originalQuery?.replace(/^x\s/, ''));
-			if (newProduct)
+			const lines = this.shoppinglist.split('\n');
+			const line = lines[product.listIndex];
+			const newProduct = window.prompt(message, line.replace(/^x /, ''));
+			if (newProduct?.trim())
 			{
-				this.shoppinglist = this.shoppinglist.split("\n").map(line => 
-				{
-					if (line.includes(product.originalQuery))
-					{
-						line = (product.originalQuery.startsWith("x ") ? "x " : "") + newProduct;
-					}
-					return line;
-				}).join("\n");
+				lines[product.listIndex] = (line.startsWith('x ') ? 'x ' : '') + newProduct.trim();
+				this.shoppinglist = lines.join('\n');
 				this.saveShoppinglist();
-				
-				const currentCode = this.selectedSupermarket ? this.selectedSupermarket.code : null;
-				await this.search();
-				
-				if (currentCode) {
-					this.selectedSupermarket = this.supermarkets.find(s => s.code == currentCode);
+
+				if (this.shoppingPlan)
+				{
+					await this.createShoppingPlan(false);
+				}
+				else
+				{
+					const currentCode = this.selectedSupermarket.code;
+					await this.search();
+					this.selectedSupermarket = this.supermarkets.find(s => s.code === currentCode);
 				}
 			}
 		},
 		share: async function()
 		{
-			var hash = this.shoppinglist.replace(/\n/g, "%0A");
-			if (this.shopMultipleSupermarkets) {
-				hash += "|" + (this.shopMultipleSupermarkets ? "1" : "0");
-				hash += "|" + this.maxSupermarkets;
-				hash += "|" + this.selectedSupermarketCodes.join(",");
+			const url = new URL(window.location.href);
+			url.searchParams.set('lang', this.language);
+			let hash = this.shoppinglist.replace(/%/g, '%25').replace(/\|/g, '%7C').replace(/\n/g, '%0A');
+			if (this.shopMultipleSupermarkets)
+			{
+				hash += '|1|' + this.maxSupermarkets + '|' + this.selectedSupermarketCodes.join(',');
 			}
-			window.location.hash = hash;
-			var shared = false;
-			// Share the shoppinglist using the device's share functionality
+			url.hash = hash;
 			if (navigator.share)
 			{
 				try
 				{
-					await navigator.share(
-					{
-						title: "Checkjebon.nl",
-						text: "Je boodschappenlijst van Checkjebon.nl",
-						url: window.location.href
+					await navigator.share({
+						title: 'Checkjebon.nl',
+						text: this.t('sharedText'),
+						url: url.href
 					});
-					shared = true;
+					return;
 				}
-				catch(e)
+				catch (error)
 				{
-					console.log('Error sharing link', e);
+					if (error.name === 'AbortError') return;
+					console.log('Error sharing link', error);
 				}
 			}
-			// Share the shoppinglist via email
-			if (!shared)
+			const products = this.shoppinglist.split('\n').map(p => p.trim()).filter(Boolean);
+			const body = [this.t('emailIntro'), products.map(p => '- ' + p).join('\n')];
+			if (this.selectedSupermarket)
 			{
-				var body = `Hoi, hier is je boodschappenlijst:`;
-				body += `%0A%0A`;
-				body += encodeURIComponent(this.shoppinglist.split("\n").map(p => "- " + p.trim()).filter(p => p).join("\n"));
-				if (this.selectedSupermarket)
-				{
-					body += `%0A%0A`;
-					body += `De totaalprijs bij ${this.selectedSupermarket.c} komt uit op ${this.$options.filters.formatPrice(this.selectedSupermarket.totalPrice)} euro.`;
-				}
-				body += `%0A%0A`;
-				body += `Ga verder met deze boodschappenlijst via de link hieronder.%0A%0A`;
-				body += encodeURIComponent(window.location.href);
-				window.location = `mailto:?subject=Checkjebon.nl - boodschappenlijst&body=${body}`;
+				body.push(this.t('emailTotal', {
+					store: this.selectedSupermarket.name,
+					price: this.formatPrice(this.selectedSupermarket.totalPrice)
+				}));
 			}
-			window.location.hash = "";
+			body.push(this.t('emailLink'), url.href);
+			window.location.href = 'mailto:?subject=' + encodeURIComponent(this.t('emailSubject')) +
+				'&body=' + encodeURIComponent(body.join('\n\n'));
 		},
 		saveShoppinglist: function()
 		{
@@ -438,11 +391,10 @@ var app = new Vue(
 			// Override shoppinglist from URL hash, if present
 			if (window.location.hash)
 			{
-				if (!this.shoppinglist || window.confirm("Druk op OK om de lijst die je net opent te gebruiken of Annuleren om verder te gaan met de lijst die je eerder hebt gemaakt."))
+				if (!this.shoppinglist || window.confirm(this.t('replaceList')))
 				{
-					var hashContent = decodeURI(window.location.hash).substr(1);
-					var parts = hashContent.split("|");
-					this.shoppinglist = parts[0];
+					const parts = window.location.hash.slice(1).split("|");
+					this.shoppinglist = decodeURI(parts[0]);
 					if (parts.length > 1) {
 						this.shopMultipleSupermarkets = parts[1] === "1";
 						this.maxSupermarkets = parseInt(parts[2]) || null;
@@ -492,6 +444,7 @@ var app = new Vue(
 	},
 	created: function()
 	{
+		this.updatePageLanguage();
 		this.loadShoppinglist();
 	}
 });

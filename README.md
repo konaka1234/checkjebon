@@ -16,6 +16,18 @@ After setting up your shopping list and selecting your preferred supermarket, si
 
 You can share your current shopping list with family members or friends at any time, or use the sharing functionality to use the shopping list created on your desktop or tablet to your phone as you go out to get groceries.
 
+# Language and local development
+
+Choose **English** in the language menu or open the page with `?lang=en`. The
+site remembers your language preference. Shopping lists accept Dutch and common
+English grocery terms, such as `semi-skimmed milk` and `brown rice`. Results show
+the supermarket's original product names. If a term does not match, try the Dutch
+product name.
+
+To run the site locally, run `python3 -m http.server 8000` from the repository
+root and open `http://localhost:8000/?lang=en`. The app uses the upstream
+Checkjebon JavaScript library and price data, so price comparisons need internet access.
+
 # Including in other products
 
 To include Checkjebon.nl in other products, use the [checkjebon-js](https://github.com/supermarkt/checkjebon-js) library as a starting point. This library will take care of loading the latest data and exposing it in a format that is easy to use.
